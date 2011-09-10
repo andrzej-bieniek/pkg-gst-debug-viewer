@@ -12,4 +12,4 @@ Architecture: all
 Depends: ${misc:Depends}, ${python:Depends}
 Breaks: ${python:Breaks}
 Description: GStreamer Debug Viewer
-
+ GStreamer Debug Viewer is a program to ease working with GStreamer debug log files.
