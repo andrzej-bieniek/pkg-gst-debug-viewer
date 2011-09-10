@@ -4,6 +4,8 @@ Section: python
 Priority: optional
 Build-Depends: python-all (>= 2.6.6-3), debhelper (>= 7.4.3)
 Standards-Version: 3.9.1
+Vcs-Git: git://github.com/andyhelp/pkg-gst-debug-viewer.git
+Vcs-browser: https://github.com/andyhelp/pkg-gst-debug-viewer
 
 Package: python-gst-debug-viewer
 Architecture: all
