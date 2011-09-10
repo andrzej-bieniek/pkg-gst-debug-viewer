@@ -1,0 +1,13 @@
+Source: gst-debug-viewer
+Maintainer: Andrzej Bieniek <andyhelp@gmail.com>
+Section: python
+Priority: optional
+Build-Depends: python-all (>= 2.6.6-3), debhelper (>= 7.4.3)
+Standards-Version: 3.9.1
+
+Package: python-gst-debug-viewer
+Architecture: all
+Depends: ${misc:Depends}, ${python:Depends}
+Breaks: ${python:Breaks}
+Description: GStreamer Debug Viewer
+
