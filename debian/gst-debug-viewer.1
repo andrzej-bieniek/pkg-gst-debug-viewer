@@ -1,0 +1,37 @@
+.TH gst-debug-viewer 1 2011-09-11
+.SH NAME
+gst-debug-viewer \- GStreamer Debug Viewer
+.SH SYNOPSIS
+.PP
+.B gst-debug-viewer
+[
+.B OPTIONS
+]
+[
+.B FILENAME
+]
+
+.SH DESCRIPTION
+.\" Putting a newline after each sentence can generate better output.
+GStreamer Debug Viewer is a program to ease working with Gstreamer debug log files.
+.SH OPTIONS
+.TP
+.BR -h, --help
+Show help options
+.TP
+.B \-l, --log-level=LEVEL
+Enable logging (debug, info, warning, error, critical)
+.TP
+.B \-\-version
+Display version and exit
+.SH EXAMPLES
+Generated log file to view needs to be plain ascii file (without colors).
+To generate log file run:
+.B
+    gst\-launch \-\-gst-debug-no-color \-\-gst\-debug=5 fakesrc num-buffers=10 ! fakesink > logfile.txt 2>&1
+
+To view the log file in the viewer run:
+.B
+    gst-debug-view logfile.txt
+.SH "SEE ALSO"
+.BR gst-launch (1)
