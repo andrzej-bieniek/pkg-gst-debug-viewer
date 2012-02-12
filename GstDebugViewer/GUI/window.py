@@ -19,6 +19,8 @@
 
 """GStreamer Debug Viewer GUI module."""
 
+ZOOM_FACTOR = 1.15
+
 def _ (s):
     return s
 
@@ -41,6 +43,31 @@ from GstDebugViewer.GUI.models import (FilteredLogModel,
                                        LogModelBase,
                                        RangeFilteredLogModel)
 
+def action (func):
+
+    func.is_action_handler = True
+
+    return func
+
+def iter_actions (manager):
+
+    cls = type (manager)
+    it = cls.__dict__.iteritems ()
+    for name, member in it:
+        try:
+            member.is_action_handler
+        except AttributeError:
+            continue
+
+        bound_method = getattr (manager, name)
+
+        assert name.startswith ("handle_")
+        assert name.endswith ("_action_activate")
+        action_name = name[len ("handle_"):-len ("_action_activate")]
+        action_name = action_name.replace ("_", "-")
+
+        yield (action_name, bound_method,)
+
 class LineView (object):
 
     def __init__ (self):
@@ -49,9 +76,11 @@ class LineView (object):
 
     def attach (self, window):
 
+        for action_name, handler in iter_actions (self):
+            action = getattr (window.actions, action_name)
+            action.connect ("activate", handler)
+
         self.clear_action = window.actions.clear_line_view
-        handler = self.handle_clear_line_view_action_activate
-        self.clear_action.connect ("activate", handler)
 
         self.line_view = window.widgets.line_view
         self.line_view.connect ("row-activated", self.handle_line_view_row_activated)
@@ -142,6 +171,7 @@ class LineView (object):
         else:
             line_model.replace_line (0, line_index)
 
+    @action
     def handle_clear_line_view_action_activate (self, action):
 
         self.clear ()
@@ -215,7 +245,10 @@ class Window (object):
                             ("close-window", gtk.STOCK_CLOSE, _("Close _Window"), "<Ctrl>W"),
                             ("cancel-load", gtk.STOCK_CANCEL, None,),
                             ("clear-line-view", gtk.STOCK_CLEAR, None),
-                            ("show-about", gtk.STOCK_ABOUT, None)])
+                            ("show-about", gtk.STOCK_ABOUT, None),
+                            ("enlarge-text", gtk.STOCK_ZOOM_IN, _("Enlarge Text"), "<Ctrl>plus"),
+                            ("shrink-text", gtk.STOCK_ZOOM_OUT, _("Shrink Text"), "<Ctrl>minus"),
+                            ("reset-text", gtk.STOCK_ZOOM_100, _("Normal Text Size"), "<Ctrl>0")])
         self.actions.add_group (group)
         self.actions.reload_file.props.sensitive = False
 
@@ -284,21 +317,19 @@ class Window (object):
 
     def attach (self):
 
+        self.zoom_level = 0
+        zoom_percent = self.app.state_section.zoom_level
+        if zoom_percent:
+            self.restore_zoom (float (zoom_percent) / 100.)
+
         self.window_state.attach (window = self.gtk_window,
                                   state = self.app.state_section)
 
         self.clipboard = gtk.Clipboard (self.gtk_window.get_display (),
                                         gtk.gdk.SELECTION_CLIPBOARD)
 
-        for action_name in ("new-window", "open-file", "reload-file",
-                            "close-window", "cancel-load",
-                            "hide-before-line", "hide-after-line", "show-hidden-lines",
-                            "edit-copy-line", "edit-copy-message", "set-base-time",
-                            "hide-log-level", "hide-log-category", "hide-log-object",
-                            "hide-filename", "show-about",):
-            name = action_name.replace ("-", "_")
-            action = getattr (self.actions, name)
-            handler = getattr (self, "handle_%s_action_activate" % (name,))
+        for action_name, handler in iter_actions (self):
+            action = getattr (self.actions, action_name)
             action.connect ("activate", handler)
 
         self.gtk_window.connect ("delete-event", self.handle_window_delete_event)
@@ -408,7 +439,7 @@ class Window (object):
 
             try:
                 select_index = model.line_index_from_top (selected_index)
-            except IndexError, exc:
+            except IndexError as exc:
                 self.logger.debug ("abs line index %i filtered out, not reselecting",
                                    selected_index)
             else:
@@ -468,10 +499,12 @@ class Window (object):
 
         self.actions.close_window.activate ()
 
+    @action
     def handle_new_window_action_activate (self, action):
 
         self.app.open_window ()
 
+    @action
     def handle_open_file_action_activate (self, action):
 
         dialog = gtk.FileChooserDialog (None, self.gtk_window,
@@ -484,6 +517,7 @@ class Window (object):
             self.set_log_file (dialog.get_filename ())
         dialog.destroy ()
 
+    @action
     def handle_reload_file_action_activate (self, action):
 
         if self.log_file is None:
@@ -491,6 +525,7 @@ class Window (object):
 
         self.set_log_file (self.log_file.path)
 
+    @action
     def handle_cancel_load_action_activate (self, action):
 
         self.logger.debug ("cancelling data load")
@@ -504,14 +539,17 @@ class Window (object):
             gobject.source_remove (self.update_progress_id)
             self.update_progress_id = None
 
+    @action
     def handle_close_window_action_activate (self, action):
 
         self.close ()
 
+    @action
     def handle_hide_after_line_action_activate (self, action):
 
         self.hide_range (after = True)
 
+    @action
     def handle_hide_before_line_action_activate (self, action):
 
         self.hide_range (after = False)
@@ -551,6 +589,7 @@ class Window (object):
         self.pop_view_state ()
         self.actions.show_hidden_lines.props.sensitive = True
 
+    @action
     def handle_show_hidden_lines_action_activate (self, action):
 
         self.logger.info ("restoring model filter to show all lines")
@@ -561,6 +600,7 @@ class Window (object):
         self.pop_view_state (scroll_to_selection = True)
         self.actions.show_hidden_lines.props.sensitive = False
 
+    @action
     def handle_edit_copy_line_action_activate (self, action):
 
         # TODO: Should probably copy the _exact_ line as taken from the file.
@@ -569,10 +609,46 @@ class Window (object):
         log_line = Data.LogLine (line)
         self.clipboard.set_text (log_line.line_string ())
 
+    @action
     def handle_edit_copy_message_action_activate (self, action):
 
         col_id = LogModelBase.COL_MESSAGE
         self.clipboard.set_text (self.get_active_line ()[col_id])
+
+    @action
+    def handle_enlarge_text_action_activate (self, action):
+
+        self.update_zoom_level (1)
+
+    @action
+    def handle_shrink_text_action_activate (self, action):
+
+        self.update_zoom_level (-1)
+
+    @action
+    def handle_reset_text_action_activate (self, action):
+
+        self.update_zoom_level (-self.zoom_level)
+
+    def restore_zoom (self, scale):
+
+        from math import log
+
+        self.zoom_level = int (round (log (scale) / log (ZOOM_FACTOR)))
+
+        self.column_manager.set_zoom (scale)
+
+    def update_zoom_level (self, delta_step):
+
+        if not delta_step:
+            return
+
+        self.zoom_level += delta_step
+        scale = ZOOM_FACTOR ** self.zoom_level
+
+        self.column_manager.set_zoom (scale)
+
+        self.app.state_section.zoom_level = int (round (scale * 100.))
 
     def add_model_filter (self, filter):
 
@@ -628,36 +704,41 @@ class Window (object):
 
         self.actions.show_hidden_lines.props.sensitive = True
 
+    @action
     def handle_set_base_time_action_activate (self, action):
 
         row = self.get_active_line ()
-        time_column = self.column_manager.find_item (name = "time")
-        time_column.set_base_time (row[LogModelBase.COL_TIME])
+        self.column_manager.set_base_time (row[LogModelBase.COL_TIME])
 
+    @action
     def handle_hide_log_level_action_activate (self, action):
 
         row = self.get_active_line ()
         debug_level = row[LogModelBase.COL_LEVEL]
         self.add_model_filter (DebugLevelFilter (debug_level))
 
+    @action
     def handle_hide_log_category_action_activate (self, action):
 
         row = self.get_active_line ()
         category = row[LogModelBase.COL_CATEGORY]
         self.add_model_filter (CategoryFilter (category))
 
+    @action
     def handle_hide_log_object_action_activate (self, action):
 
         row = self.get_active_line ()
         object_ = row[LogModelBase.COL_OBJECT]
         self.add_model_filter (ObjectFilter (object_))
 
+    @action
     def handle_hide_filename_action_activate (self, action):
 
         row = self.get_active_line ()
         filename = row[LogModelBase.COL_FILENAME]
         self.add_model_filter (FilenameFilter (filename))
 
+    @action
     def handle_show_about_action_activate (self, action):
 
         from GstDebugViewer import version
@@ -699,7 +780,7 @@ class Window (object):
 
                 self.dispatcher = Common.Data.GSourceDispatcher ()
                 self.log_file = Data.LogFile (filename, self.dispatcher)
-            except EnvironmentError, exc:
+            except EnvironmentError as exc:
                 try:
                     file_size = os.path.getsize (filename)
                 except EnvironmentError:

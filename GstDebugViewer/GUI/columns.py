@@ -54,7 +54,7 @@ class SizedColumn (Column):
 
     default_size = None
 
-    def compute_default_size (self, view, model):
+    def compute_default_size (self):
 
         return None
 
@@ -72,6 +72,7 @@ class TextColumn (SizedColumn):
         column.pack_start (cell)
 
         cell.props.yalign = 0.
+        cell.props.ypad = 0
 
         if self.font_family:
             cell.props.family = self.font_family
@@ -108,11 +109,11 @@ class TextColumn (SizedColumn):
             cell.props.text = modify_func (model.get (tree_iter, id_)[0])
         column.set_cell_data_func (cell, cell_data_func)
 
-    def compute_default_size (self, view, model):
+    def compute_default_size (self):
 
         values = self.get_values_for_size ()
         if not values:
-            return SizedColumn.compute_default_size (self, view, model)
+            return SizedColumn.compute_default_size (self)
 
         cell = self.view_column.get_cell_renderers ()[0]
 
@@ -215,10 +216,7 @@ class LevelColumn (TextColumn):
             else:
                 cell_colors = (None, None, None,)
             cell_props.foreground_gdk = cell_colors[0]
-            if path[0] % 2:
-                cell_props.background_gdk = cell_colors[1]
-            else:
-                cell_props.background_gdk = cell_colors[2]
+            cell_props.background_gdk = cell_colors[1]
 
         return level_data_func
 
@@ -376,6 +374,7 @@ class ColumnManager (Common.GUI.Manager):
 
         self.view = None
         self.actions = None
+        self.zoom = 1.0
         self.__columns_changed_id = None
         self.columns = []
         self.column_order = list (self.column_classes)
@@ -449,6 +448,25 @@ class ColumnManager (Common.GUI.Manager):
         sort_model.set_sort_column_id (TREE_SORTABLE_UNSORTED_COLUMN_ID,
                                        gtk.SORT_ASCENDING)
 
+    def set_zoom (self, scale):
+
+        for column in self.columns:
+            cell = column.view_column.get_cell_renderers ()[0]
+            cell.props.scale = scale
+            column.view_column.queue_resize ()
+
+        self.zoom = scale
+
+    def set_base_time (self, base_time):
+
+        try:
+            time_column = self.find_item (name = TimeColumn.name)
+        except KeyError:
+            return
+
+        time_column.set_base_time (base_time)
+        self.size_column (time_column)
+
     def get_toggle_action (self, column_class):
 
         action_name = "show-%s-column" % (column_class.name,)
@@ -462,8 +480,13 @@ class ColumnManager (Common.GUI.Manager):
 
         name = column.name
         pos = self.__get_column_insert_position (column)
+
         if self.view.props.fixed_height_mode:
             column.view_column.props.sizing = gtk.TREE_VIEW_COLUMN_FIXED
+
+        cell = column.view_column.get_cell_renderers ()[0]
+        cell.props.scale = self.zoom
+
         self.columns.insert (pos, column)
         self.view.insert_column (column.view_column, pos)
 
@@ -582,10 +605,27 @@ class ViewColumnManager (ColumnManager):
 
         return ColumnManager.detach (self)
 
-    def size_column (self, column, view, model):
+    def set_zoom (self, scale):
+
+        ColumnManager.set_zoom (self, scale)
+
+        if self.view is None:
+            return
+
+        # Timestamp and log level columns are pretty much fixed size, so resize
+        # them back to default on zoom change:
+        names = (TimeColumn.name,
+                 LevelColumn.name,
+                 PidColumn.name,
+                 ThreadColumn.name)
+        for column in self.columns:
+            if column.name in names:
+                self.size_column (column)
+
+    def size_column (self, column):
 
         if column.default_size is None:
-            default_size = column.compute_default_size (view, model)
+            default_size = column.compute_default_size ()
         else:
             default_size = column.default_size
         # FIXME: Abstract away fixed size setting in Column class!
@@ -599,8 +639,7 @@ class ViewColumnManager (ColumnManager):
     def _add_column (self, column):
 
         result = ColumnManager._add_column (self, column)
-        model = self.view.get_model ()
-        self.size_column (column, self.view, model)
+        self.size_column (column)
         return result
 
     def _remove_column (self, column):
@@ -618,7 +657,7 @@ class ViewColumnManager (ColumnManager):
             return
         self.logger.debug ("model changed, sizing columns")
         for column in self.iter_items ():
-            self.size_column (column, view, model)
+            self.size_column (column)
         self.columns_sized = True
 
 class WrappingMessageColumn (MessageColumn):
