@@ -517,19 +517,19 @@ class TimelineWidget (gtk.DrawingArea):
 
     def update (self, model):
 
+        self.clear ()
         self.model = model
 
-        width = self.get_allocation ()[2]
-
-        self.process.abort ()
-        if model:
+        if model is not None:
             self.process.freq_sentinel = LineFrequencySentinel (model)
             self.process.dist_sentinel = LevelDistributionSentinel (self.process.freq_sentinel, model)
+            width = self.get_allocation ()[2]
             self.process.freq_sentinel.run_for (width)
             self.process.run ()
 
     def clear (self):
 
+        self.model = None
         self.process.abort ()
         self.process.freq_sentinel = None
         self.process.dist_sentinel = None
@@ -956,8 +956,6 @@ class AttachedWindow (object):
 
         view = self.window.log_view
         view.scroll_to_cell (path, use_align = True, row_align = .5)
-        sel = view.get_selection ()
-        sel.select_path (path)
 
         return False
 

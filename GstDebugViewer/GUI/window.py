@@ -28,6 +28,7 @@ import os.path
 from bisect import bisect_right, bisect_left
 import logging
 
+import pango
 import gobject
 import gtk
 
@@ -40,8 +41,7 @@ from GstDebugViewer.GUI.filters import (CategoryFilter,
 from GstDebugViewer.GUI.models import (FilteredLogModel,
                                        LazyLogModel,
                                        LineViewLogModel,
-                                       LogModelBase,
-                                       RangeFilteredLogModel)
+                                       LogModelBase)
 
 def action (func):
 
@@ -118,8 +118,8 @@ class LineView (object):
         line_index = path[0]
         line_model = view.get_model ()
         log_model = self.log_view.get_model ()
-        top_index = line_model.line_index_to_top (line_index)
-        log_index = log_model.line_index_from_top (top_index)
+        super_index = line_model.line_index_to_super (line_index)
+        log_index = log_model.line_index_from_super (super_index)
         path = (log_index,)
         self.log_view.scroll_to_cell (path, use_align = True, row_align = .5)
         sel = self.log_view.get_selection ()
@@ -130,7 +130,7 @@ class LineView (object):
         log_model = view.get_model ()
         line_index = path[0]
 
-        top_line_index = log_model.line_index_to_top (line_index)
+        super_index = log_model.line_index_to_super (line_index)
         line_model = self.line_view.get_model ()
         if line_model is None:
             return
@@ -142,14 +142,14 @@ class LineView (object):
         else:
             position = 0
         if len (line_model) > 1:
-            other_index = line_model.line_index_to_top (position - 1)
+            other_index = line_model.line_index_to_super (position - 1)
         else:
             other_index = -1
-        if other_index == top_line_index and position != 1:
+        if other_index == super_index and position != 1:
             # Already have the line.
             pass
         else:
-            line_model.insert_line (position, top_line_index)
+            line_model.insert_line (position, super_index)
             self.clear_action.props.sensitive = True
 
     def handle_log_view_selection_changed (self, selection):
@@ -164,7 +164,7 @@ class LineView (object):
             return
 
         path = model.get_path (tree_iter)
-        line_index = model.line_index_to_top (path[0])
+        line_index = model.line_index_to_super (path[0])
 
         if len (line_model) == 0:
             line_model.insert_line (0, line_index)
@@ -180,18 +180,24 @@ class ProgressDialog (object):
 
     def __init__ (self, window, title = ""):
 
-        widgets = window.widget_factory.make ("progress-dialog.ui", "progress_dialog")
-        dialog = widgets.progress_dialog
-        dialog.connect ("response", self.__handle_dialog_response)
+        bar = gtk.InfoBar ()
+        bar.props.message_type = gtk.MESSAGE_INFO
+        bar.connect ("response", self.__handle_info_bar_response)
+        bar.add_button (gtk.STOCK_CANCEL, 1)
+        area_box = bar.get_content_area ()
+        box = gtk.HBox (spacing = 8)
 
-        self.__dialog = dialog
-        self.__progress_bar = widgets.progress_bar
-        self.__progress_bar.props.text = title
+        box.pack_start (gtk.Label (title), False, False, 0)
 
-        dialog.set_transient_for (window.gtk_window)
-        dialog.show ()
+        progress = gtk.ProgressBar ()
+        box.pack_start (progress, False, False, 0)
 
-    def __handle_dialog_response (self, dialog, resp):
+        area_box.pack_start (box, False, False, 0)
+
+        self.widget = bar
+        self.__progress_bar = progress
+
+    def __handle_info_bar_response (self, info_bar, response):
 
         self.handle_cancel ()
 
@@ -206,14 +212,6 @@ class ProgressDialog (object):
 
         self.__progress_bar.props.fraction = progress
 
-    def destroy (self):
-
-        if self.__dialog is None:
-            return
-        self.__dialog.destroy ()
-        self.__dialog = None
-        self.__progress_bar = None
-
 class Window (object):
 
     def __init__ (self, app):
@@ -222,6 +220,7 @@ class Window (object):
         self.app = app
 
         self.dispatcher = None
+        self.info_widget = None
         self.progress_dialog = None
         self.update_progress_id = None
 
@@ -231,7 +230,7 @@ class Window (object):
         self.actions = Common.GUI.Actions ()
 
         group = gtk.ActionGroup ("MenuActions")
-        group.add_actions ([("FileMenuAction", None, _("_File")),
+        group.add_actions ([("AppMenuAction", None, _("_Application")),
                             ("ViewMenuAction", None, _("_View")),
                             ("ViewColumnsMenuAction", None, _("_Columns")),
                             ("HelpMenuAction", None, _("_Help")),
@@ -245,7 +244,7 @@ class Window (object):
                             ("close-window", gtk.STOCK_CLOSE, _("Close _Window"), "<Ctrl>W"),
                             ("cancel-load", gtk.STOCK_CANCEL, None,),
                             ("clear-line-view", gtk.STOCK_CLEAR, None),
-                            ("show-about", gtk.STOCK_ABOUT, None),
+                            ("show-about", None, _("About GStreamer Debug Viewer",)),
                             ("enlarge-text", gtk.STOCK_ZOOM_IN, _("Enlarge Text"), "<Ctrl>plus"),
                             ("shrink-text", gtk.STOCK_ZOOM_OUT, _("Shrink Text"), "<Ctrl>minus"),
                             ("reset-text", gtk.STOCK_ZOOM_100, _("Normal Text Size"), "<Ctrl>0")])
@@ -269,7 +268,8 @@ class Window (object):
         self.actions.add_group (self.column_manager.action_group)
 
         self.log_file = None
-        self.setup_model (LazyLogModel ())
+        self.log_model = None
+        self.log_filter = None
 
         self.widget_factory = Common.GUI.WidgetFactory (Main.Paths.data_dir)
         self.widgets = self.widget_factory.make ("main-window.ui", "main_window")
@@ -292,21 +292,23 @@ class Window (object):
         self.view_popup = ui.get_widget ("/ui/context/LogViewContextMenu").get_submenu ()
         Common.GUI.widget_add_popup_menu (self.log_view, self.view_popup)
 
+        # Widgets to set insensitive when the window is considered as
+        # such. This is done during loading/filtering, where we can't set the
+        # whole window insensitive because the progress info bar should be
+        # usable to allow cancellation.
+        self.main_sensitivity = [menubar]
+        self.main_sensitivity.extend (self.widgets.vbox_main.get_children ())
+
         self.line_view = LineView ()
 
         self.attach ()
         self.column_manager.attach (self.log_view)
 
-    def setup_model (self, model, filter = False):
+    def setup_model (self, model):
 
         self.log_model = model
-        self.log_range = RangeFilteredLogModel (self.log_model)
-        if filter:
-            self.log_filter = FilteredLogModel (self.log_range)
-            self.log_filter.handle_process_finished = self.handle_log_filter_process_finished
-        else:
-            self.log_filter = None
-
+        self.log_filter = FilteredLogModel (self.log_model)
+        self.log_filter.handle_process_finished = self.handle_log_filter_process_finished
     def get_top_attach_point (self):
 
         return self.widgets.vbox_main
@@ -349,6 +351,10 @@ class Window (object):
         sel.set_mode (gtk.SELECTION_BROWSE)
 
         self.line_view.attach (self)
+
+        # Do not translate; fallback application name for e.g. gnome-shell if
+        # the desktop file is not installed:
+        self.gtk_window.set_wmclass ("gst-debug-viewer", "GStreamer Debug Viewer")
 
         self.gtk_window.show ()
 
@@ -402,7 +408,7 @@ class Window (object):
             super_index = None
             self.logger.debug ("no line selected")
         else:
-            super_index = model.line_index_to_top (line_index)
+            super_index = model.line_index_to_super (line_index)
             self.logger.debug ("pushing selected line %i (abs %i)",
                                line_index, super_index)
 
@@ -412,7 +418,7 @@ class Window (object):
         if vis_range is not None:
             start_path, end_path = vis_range
             start_index = start_path[0]
-            self.default_start_index = model.line_index_to_top (start_index)
+            self.default_start_index = model.line_index_to_super (start_index)
 
     def update_model (self, model = None):
 
@@ -438,7 +444,7 @@ class Window (object):
         if selected_index is not None:
 
             try:
-                select_index = model.line_index_from_top (selected_index)
+                select_index = model.line_index_from_super (selected_index)
             except IndexError as exc:
                 self.logger.debug ("abs line index %i filtered out, not reselecting",
                                    selected_index)
@@ -460,7 +466,7 @@ class Window (object):
                     yield i
             for current_index in traverse ():
                 try:
-                    target_index = model.line_index_from_top (current_index)
+                    target_index = model.line_index_from_super (current_index)
                 except IndexError:
                     continue
                 else:
@@ -499,6 +505,8 @@ class Window (object):
 
         self.actions.close_window.activate ()
 
+        return True
+
     @action
     def handle_new_window_action_activate (self, action):
 
@@ -532,12 +540,14 @@ class Window (object):
 
         self.set_log_file (None)
 
-        if self.progress_dialog:
-            self.progress_dialog.destroy ()
+        if self.progress_dialog is not None:
+            self.hide_info ()
             self.progress_dialog = None
         if self.update_progress_id is not None:
             gobject.source_remove (self.update_progress_id)
             self.update_progress_id = None
+
+        self.set_sensitive (True)
 
     @action
     def handle_close_window_action_activate (self, action):
@@ -563,16 +573,16 @@ class Window (object):
             return
 
         if after:
-            first_index = model.line_index_to_top (0)
-            last_index = model.line_index_to_top (filtered_line_index)
+            first_index = model.line_index_to_super (0)
+            last_index = model.line_index_to_super (filtered_line_index)
 
             self.logger.info ("hiding lines after %i (abs %i), first line is abs %i",
                               filtered_line_index,
                               last_index,
                               first_index)
         else:
-            first_index = model.line_index_to_top (filtered_line_index)
-            last_index = model.line_index_to_top (len (model) - 1)
+            first_index = model.line_index_to_super (filtered_line_index)
+            last_index = model.line_index_to_super (len (model) - 1)
 
             self.logger.info ("hiding lines before %i (abs %i), last line is abs %i",
                               filtered_line_index,
@@ -582,9 +592,7 @@ class Window (object):
         self.push_view_state ()
         start_index = first_index
         stop_index = last_index + 1
-        self.log_range.set_range (start_index, stop_index)
-        if self.log_filter:
-            self.log_filter.super_model_changed_range ()
+        self.log_filter.set_range (start_index, stop_index)
         self.update_model ()
         self.pop_view_state ()
         self.actions.show_hidden_lines.props.sensitive = True
@@ -594,9 +602,9 @@ class Window (object):
 
         self.logger.info ("restoring model filter to show all lines")
         self.push_view_state ()
-        self.log_range.reset ()
-        self.log_filter = None
-        self.update_model (self.log_range)
+        self.log_view.set_model (None)
+        self.log_filter.reset ()
+        self.update_model (self.log_filter)
         self.pop_view_state (scroll_to_selection = True)
         self.actions.show_hidden_lines.props.sensitive = False
 
@@ -650,9 +658,33 @@ class Window (object):
 
         self.app.state_section.zoom_level = int (round (scale * 100.))
 
+    def set_sensitive (self, sensitive):
+
+        for widget in self.main_sensitivity:
+            widget.props.sensitive = sensitive
+
+    def show_info (self, widget):
+
+        self.hide_info ()
+
+        box = self.widgets.vbox_main
+        box.pack_start (widget, False, False, 0)
+        box.reorder_child (widget, 2)
+        widget.show_all ()
+        self.info_widget = widget
+
+    def hide_info (self):
+
+        if self.info_widget is None:
+            return
+
+        self.info_widget.destroy ()
+        self.info_widget = None
+
     def add_model_filter (self, filter):
 
         self.progress_dialog = ProgressDialog (self, _("Filtering"))
+        self.show_info (self.progress_dialog.widget)
         self.progress_dialog.handle_cancel = self.handle_filter_progress_dialog_cancel
         dispatcher = Common.Data.GSourceDispatcher ()
         self.filter_dispatcher = dispatcher
@@ -662,12 +694,11 @@ class Window (object):
         # things down for nothing.
         self.push_view_state ()
         self.log_view.set_model (None)
-        if self.log_filter is None:
-            self.log_filter = FilteredLogModel (self.log_range)
-            self.log_filter.handle_process_finished = self.handle_log_filter_process_finished
         self.log_filter.add_filter (filter, dispatcher = dispatcher)
 
         gobject.timeout_add (250, self.update_filter_progress)
+
+        self.set_sensitive (False)
 
     def update_filter_progress (self):
 
@@ -686,16 +717,18 @@ class Window (object):
 
     def handle_filter_progress_dialog_cancel (self):
 
-        self.progress_dialog.destroy ()
+        self.hide_info ()
         self.progress_dialog = None
 
         self.log_filter.abort_process ()
         self.log_view.set_model (self.log_filter)
         self.pop_view_state ()
 
+        self.set_sensitive (True)
+
     def handle_log_filter_process_finished (self):
 
-        self.progress_dialog.destroy ()
+        self.hide_info ()
         self.progress_dialog = None
 
         # No push_view_state here, did this in add_model_filter.
@@ -703,6 +736,8 @@ class Window (object):
         self.pop_view_state ()
 
         self.actions.show_hidden_lines.props.sensitive = True
+
+        self.set_sensitive (True)
 
     @action
     def handle_set_base_time_action_activate (self, action):
@@ -807,22 +842,30 @@ class Window (object):
 
     def show_error (self, message1, message2):
 
-        dialog = gtk.MessageDialog (self.gtk_window, gtk.DIALOG_MODAL, gtk.MESSAGE_ERROR,
-                                    gtk.BUTTONS_OK, message1)
-        # The property for secondary text is new in 2.10, so we use this clunky
-        # method instead.
-        dialog.format_secondary_text (message2)
-        dialog.set_default_response (0)
-        dialog.run ()
-        dialog.destroy ()
+        bar = gtk.InfoBar ()
+        bar.props.message_type = gtk.MESSAGE_ERROR
+        box = bar.get_content_area ()
+
+        attrs = pango.AttrList ()
+        attrs.insert (pango.AttrWeight (pango.WEIGHT_BOLD, 0, len (message1)))
+        label = gtk.Label ()
+        label.props.label = "%s %s" % (message1, message2)
+        label.props.attributes = attrs
+        label.props.selectable = True
+        box.pack_start (label, False, False, 0)
+
+        self.show_info (bar)
 
     def handle_load_started (self):
 
         self.logger.debug ("load has started")
 
         self.progress_dialog = ProgressDialog (self, _("Loading log file"))
+        self.show_info (self.progress_dialog.widget)
         self.progress_dialog.handle_cancel = self.handle_load_progress_dialog_cancel
         self.update_progress_id = gobject.timeout_add (250, self.update_load_progress)
+
+        self.set_sensitive (False)
 
     def handle_load_progress_dialog_cancel (self):
 
@@ -844,24 +887,29 @@ class Window (object):
 
         self.logger.debug ("load has finshed")
 
-        self.progress_dialog.destroy ()
+        self.hide_info ()
         self.progress_dialog = None
 
         self.log_model.set_log (self.log_file)
-        self.log_range.reset ()
-        self.log_filter = None
+        self.log_filter.reset ()
 
         self.actions.reload_file.props.sensitive = True
         self.actions.groups["RowActions"].props.sensitive = True
         self.actions.show_hidden_lines.props.sensitive = False
 
+        self.set_sensitive (True)
+
+        if len (self.log_model) == 0:
+            self.show_error (_("The file does not contain any parsable lines."),
+                             _("It is not a GStreamer log file."))
+
         def idle_set ():
-            self.log_view.set_model (self.log_range)
+            self.log_view.set_model (self.log_filter)
 
             self.line_view.handle_attach_log_file (self)
             for feature in self.features:
                 feature.handle_attach_log_file (self, self.log_file)
-            if len (self.log_range):
+            if len (self.log_filter):
                 sel = self.log_view.get_selection ()
                 sel.select_path ((0,))
             return False
