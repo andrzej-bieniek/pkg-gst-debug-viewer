@@ -144,18 +144,21 @@ def default_log_line_regex_ ():
     TIME = r"(\d+:\d\d:\d\d\.\d+)\s+"
     CATEGORY = "([A-Za-z0-9_-]+)\s+" # "GST_REFCOUNTING ", "flacdec "
     # "  3089 "
-    PID = r"(\d+)\s+"
-    FILENAME = r"([^:]+):"
+    PID = r"(\d+)\s*"
+    FILENAME = r"([^:]*):"
     LINE = r"(\d+):"
-    FUNCTION = "([A-Za-z0-9_]+):"
+    FUNCTION = "([A-Za-z0-9_]*):"
     # FIXME: When non-g(st)object stuff is logged with *_OBJECT (like
     # buffers!), the address is printed *without* <> brackets!
-    OBJECT = "(?:<([^>]+)> )?"
+    OBJECT = "(?:<([^>]+)>)?"
     MESSAGE = "(.+)"
 
+    ANSI = "(?:\x1b\\[[0-9;]*m\\s*)*\\s*"
+
     # New log format:
-    expressions = [TIME, PID, THREAD, LEVEL, CATEGORY, FILENAME, LINE, FUNCTION,
-                   OBJECT, MESSAGE]
+    expressions = [TIME, ANSI, PID, ANSI, THREAD, ANSI, LEVEL, ANSI,
+                   CATEGORY, FILENAME, LINE, FUNCTION, ANSI,
+                   OBJECT, ANSI, MESSAGE]
     # Old log format:
     ## expressions = [LEVEL, THREAD, TIME, CATEGORY, PID, FILENAME, LINE,
     ##                FUNCTION, OBJECT, MESSAGE]
@@ -290,7 +293,15 @@ class LineCache (Producer):
                        "L" : debug_level_log, "D" : debug_level_debug,
                        "I" : debug_level_info, "W" : debug_level_warning,
                        "E" : debug_level_error, " " : debug_level_none}
-        rexp = re.compile (r"\d:\d\d:\d\d\.\d+\s+\d+\s+0x[0-9a-f]+\s+([TFLDIEW ])")
+        ANSI = "(?:\x1b\\[[0-9;]*m)?"
+        ANSI_PATTERN = (r"\d:\d\d:\d\d\.\d+ " + ANSI +
+                        r" *\d+" + ANSI +
+                        r" +0x[0-9a-f]+ +" + ANSI +
+                        r"([TFLDIEW ])")
+        BARE_PATTERN = ANSI_PATTERN.replace (ANSI, "")
+        rexp_bare = re.compile (BARE_PATTERN)
+        rexp_ansi = re.compile (ANSI_PATTERN)
+        rexp = rexp_bare
 
         # Moving attribute lookups out of the loop:
         readline = self.__fileobj.readline
@@ -307,15 +318,26 @@ class LineCache (Producer):
         sort_helper = SortHelper (self.__fileobj, offsets)
         find_insert_position = sort_helper.find_insert_position
         while True:
+            i += 1
+            if i >= limit:
+                i = 0
+                yield True
+
             offset = tell ()
             line = readline ()
             if not line:
                 break
-            # if line[18] == "\x1b":
-            #     line = strip_escape (line)
             match = rexp_match (line)
             if match is None:
-                continue
+                if rexp is rexp_ansi or not "\x1b" in line:
+                    continue
+
+                match = rexp_ansi.match (line)
+                if match is None:
+                    continue
+                # Switch to slower ANSI parsing:
+                rexp = rexp_ansi
+                rexp_match = rexp.match
 
             # Timestamp is in the very beginning of the row, and can be sorted
             # by lexical comparison. That's why we don't bother parsing the
@@ -329,10 +351,6 @@ class LineCache (Producer):
                 pos = find_insert_position (line)
                 levels.insert (pos, dict_levels_get (match.group (1), debug_level_none))
                 offsets.insert (pos, offset)
-            i += 1
-            if i >= limit:
-                i = 0
-                yield True
 
         self.have_load_finished ()
         yield False

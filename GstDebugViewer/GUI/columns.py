@@ -24,6 +24,7 @@ def _ (s):
 
 import logging
 
+import glib
 import gtk
 
 from GstDebugViewer import Common, Data
@@ -40,7 +41,6 @@ class Column (object):
     label_header = None
     get_modify_func = None
     get_data_func = None
-    get_row_data_func = None
     get_sort_func = None
 
     def __init__ (self):
@@ -84,15 +84,9 @@ class TextColumn (SizedColumn):
             id_ = self.id
             if id_ is not None:
                 def cell_data_func (column, cell, model, tree_iter):
-                    data_func (cell.props, model.get_value (tree_iter, id_), model.get_path (tree_iter))
+                    data_func (cell.props, model.get_value (tree_iter, id_))
             else:
                 cell_data_func = data_func
-            column.set_cell_data_func (cell, cell_data_func)
-        elif self.get_row_data_func:
-            data_func = self.get_row_data_func ()
-            assert data_func
-            def cell_data_func (column, cell, model, tree_iter):
-                data_func (cell.props, model[tree_iter])
             column.set_cell_data_func (cell, cell_data_func)
         elif not self.get_modify_func:
             column.add_attribute (cell, "text", self.id)
@@ -106,7 +100,7 @@ class TextColumn (SizedColumn):
         modify_func = self.get_modify_func ()
         id_ = self.id
         def cell_data_func (column, cell, model, tree_iter):
-            cell.props.text = modify_func (model.get (tree_iter, id_)[0])
+            cell.props.text = modify_func (model.get_value (tree_iter, id_))
         column.set_cell_data_func (cell, cell_data_func)
 
     def compute_default_size (self):
@@ -209,7 +203,7 @@ class LevelColumn (TextColumn):
                                        for c in theme.colors[level])),)
                        for level in Data.debug_levels
                        if level != Data.debug_level_none)
-        def level_data_func (cell_props, level, path):
+        def level_data_func (cell_props, level):
             cell_props.text = level.name[0]
             if level in colors:
                 cell_colors = colors[level]
@@ -318,7 +312,7 @@ class MessageColumn (TextColumn):
 
     name = "message"
     label_header = _("Message")
-    id = LazyLogModel.COL_MESSAGE
+    id = None
 
     def __init__ (self, *a, **kw):
 
@@ -326,32 +320,41 @@ class MessageColumn (TextColumn):
 
         TextColumn.__init__ (self, *a, **kw)
 
-    def get_row_data_func (self):
+    def get_data_func (self):
 
-        from pango import AttrList, AttrBackground, AttrForeground
         highlighters = self.highlighters
-        id_ = self.id
+        id_ = LazyLogModel.COL_MESSAGE
 
-        # FIXME: This should be none; need to investigate
-        # `cellrenderertext.props.attributes = None' failure (param conversion
-        # error like `treeview.props.model = None').
-        no_attrs = AttrList ()
+        def message_data_func (column, cell, model, tree_iter):
 
-        def message_data_func (props, row):
+            msg = model.get_value (tree_iter, id_)
 
-            props.text = row[id_]
             if not highlighters:
-                props.attributes = no_attrs
-            for highlighter in highlighters.values ():
-                ranges = highlighter (row)
-                if not ranges:
-                    props.attributes = no_attrs
-                else:
-                    attrlist = AttrList ()
-                    for start, end in ranges:
-                        attrlist.insert (AttrBackground (0, 0, 65535, start, end))
-                        attrlist.insert (AttrForeground (65535, 65535, 65535, start, end))
-                    props.attributes = attrlist
+                cell.props.text = msg
+                return
+
+            if len (highlighters) > 1:
+                raise NotImplementedError ("FIXME: Support more than one...")
+
+            highlighter = highlighters.values ()[0]
+            row = model[tree_iter]
+            ranges = highlighter (row)
+            if not ranges:
+                cell.props.text = msg
+            else:
+                tags = []
+                prev_end = 0
+                end = None
+                for start, end in ranges:
+                    if prev_end < start:
+                        tags.append (glib.markup_escape_text (msg[prev_end:start]))
+                    msg_escape = glib.markup_escape_text (msg[start:end])
+                    tags.append ("<span foreground=\'#FFFFFF\'"
+                                 " background=\'#0000FF\'>%s</span>" % (msg_escape,))
+                    prev_end = end
+                if end is not None:
+                    tags.append (glib.markup_escape_text (msg[end:]))
+                cell.props.markup = "".join (tags)
 
         return message_data_func
 
@@ -570,6 +573,9 @@ class ViewColumnManager (ColumnManager):
     column_classes = (TimeColumn, LevelColumn, PidColumn, ThreadColumn, CategoryColumn,
                       CodeColumn, FunctionColumn, ObjectColumn, MessageColumn,)
 
+    default_column_classes = (TimeColumn, LevelColumn, CategoryColumn, CodeColumn,
+                              FunctionColumn, ObjectColumn, MessageColumn,)
+
     def __init__ (self, state):
 
         ColumnManager.__init__ (self)
@@ -589,7 +595,7 @@ class ViewColumnManager (ColumnManager):
 
         visible = self.state.columns_visible
         if not visible:
-            visible = self.column_classes
+            visible = self.default_column_classes
         for col_class in self.column_classes:
             action = self.get_toggle_action (col_class)
             action.props.active = (col_class in visible)

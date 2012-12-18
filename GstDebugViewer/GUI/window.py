@@ -28,7 +28,7 @@ import os.path
 from bisect import bisect_right, bisect_left
 import logging
 
-import pango
+import glib
 import gobject
 import gtk
 
@@ -611,11 +611,14 @@ class Window (object):
     @action
     def handle_edit_copy_line_action_activate (self, action):
 
-        # TODO: Should probably copy the _exact_ line as taken from the file.
+        line_index = self.get_active_line_index ()
+        model = self.log_view.get_model ()
+        line_offset = model.line_offsets[line_index]
 
-        line = self.get_active_line ()
-        log_line = Data.LogLine (line)
-        self.clipboard.set_text (log_line.line_string ())
+        line_text = model.access_offset (line_offset).strip ()
+        line_text = Data.strip_escape (line_text)
+
+        self.clipboard.set_text (line_text)
 
     @action
     def handle_edit_copy_message_action_activate (self, action):
@@ -846,11 +849,11 @@ class Window (object):
         bar.props.message_type = gtk.MESSAGE_ERROR
         box = bar.get_content_area ()
 
-        attrs = pango.AttrList ()
-        attrs.insert (pango.AttrWeight (pango.WEIGHT_BOLD, 0, len (message1)))
+        markup = "<b>%s</b> %s" % (glib.markup_escape_text (message1),
+                                   glib.markup_escape_text (message2),)
         label = gtk.Label ()
-        label.props.label = "%s %s" % (message1, message2)
-        label.props.attributes = attrs
+        label.props.use_markup = True
+        label.props.label = markup
         label.props.selectable = True
         box.pack_start (label, False, False, 0)
 

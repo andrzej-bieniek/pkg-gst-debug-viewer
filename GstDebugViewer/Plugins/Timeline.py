@@ -171,13 +171,26 @@ class LevelDistributionSentinel (object):
         if not partitions:
             return
 
+        level_index = 0
+        level_iter = None
+
         finished = False
         while tree_iter:
             y -= 1
             if y == 0:
                 y = YIELD_LIMIT
                 yield True
-            level = model_get (tree_iter, id_level)
+            if level_iter is None:
+                stop_index = level_index + 512
+                levels = self.model.get_value_range (id_level,
+                                                     level_index, stop_index)
+                level_index = stop_index
+                level_iter = iter (levels)
+            try:
+                level = level_iter.next ()
+            except StopIteration:
+                level_iter = None
+                continue
             while i > partitions[partitions_i]:
                 data.append (tuple (counts))
                 counts = [0] * MAX_LEVELS
@@ -189,7 +202,6 @@ class LevelDistributionSentinel (object):
                 break
             counts[level] += 1
             i += 1
-            tree_iter = model_next (tree_iter)
 
         # Now handle the last one:
         data.append (tuple (counts))
@@ -271,10 +283,6 @@ class VerticalTimelineWidget (gtk.DrawingArea):
         self.thread_colors = {}
         self.next_thread_color = 0
 
-        self.connect ("expose-event", self.__handle_expose_event)
-        self.connect ("configure-event", self.__handle_configure_event)
-        self.connect ("size-request", self.__handle_size_request)
-
         try:
             self.set_tooltip_text (_("Vertical timeline\n"
                                      "Different colors represent different threads"))
@@ -282,14 +290,18 @@ class VerticalTimelineWidget (gtk.DrawingArea):
             # Compatibility.
             pass
 
-    def __handle_expose_event (self, self_, event):
+    def do_expose_event (self, event):
 
         self.__draw (self.window)
 
-    def __handle_configure_event (self, self_, event):
+        return True
+
+    def do_configure_event (self, event):
 
         self.params = None
         self.queue_draw ()
+
+        return False
 
     def __draw (self, drawable):
 
@@ -346,7 +358,7 @@ class VerticalTimelineWidget (gtk.DrawingArea):
             ctx.line_to (w + .5, row_offset + half_height)
             ctx.fill ()
 
-    def __handle_size_request (self, self_, req):
+    def do_size_request (self, req):
 
         req.width = 64 # FIXME
 
@@ -411,23 +423,28 @@ class TimelineWidget (gtk.DrawingArea):
 
     __gtype_name__ = "GstDebugViewerTimelineWidget"
 
+    __gsignals__ = {"change-position" : (gobject.SIGNAL_RUN_LAST,
+                                         gobject.TYPE_NONE,
+                                         (gobject.TYPE_INT,),)}
+
     def __init__ (self):
 
         gtk.DrawingArea.__init__ (self)
 
         self.logger = logging.getLogger ("ui.timeline")
 
+        self.add_events (gtk.gdk.BUTTON1_MOTION_MASK |
+                         gtk.gdk.BUTTON_PRESS_MASK |
+                         gtk.gdk.BUTTON_RELEASE_MASK)
+
         self.process = UpdateProcess (None, None)
-        self.connect ("expose-event", self.__handle_expose_event)
-        self.connect ("configure-event", self.__handle_configure_event)
-        self.connect ("size-request", self.__handle_size_request)
         self.process.handle_sentinel_progress = self.__handle_sentinel_progress
         self.process.handle_sentinel_finished = self.__handle_sentinel_finished
-        self.process.handle_process_finished = self.__handle_process_finished
 
         self.model = None
         self.__offscreen = None
         self.__offscreen_size = (0, 0)
+        self.__offscreen_dirty = (0, 0)
 
         self.__position_ts_range = None
 
@@ -440,54 +457,67 @@ class TimelineWidget (gtk.DrawingArea):
 
     def __handle_sentinel_progress (self, sentinel):
 
-        self.__redraw ()
+        if sentinel == self.process.dist_sentinel:
+            old_progress = self.__dist_sentinel_progress
+            new_progress = len (sentinel.data)
+            if new_progress - old_progress >= 32:
+                self.__invalidate_offscreen (old_progress, new_progress)
+                self.__dist_sentinel_progress = new_progress
 
     def __handle_sentinel_finished (self, sentinel):
 
         if sentinel == self.process.freq_sentinel:
-            self.__redraw ()
-
-    def __handle_process_finished (self):
-
-        self.__redraw ()
+            self.__invalidate_offscreen (0, -1)
+        else:
+            self.__invalidate_offscreen (self.__dist_sentinel_progress, -1)
 
     def __ensure_offscreen (self):
 
-        x, y, w, h = self.get_allocation ()
-        self.__offscreen = gtk.gdk.Pixmap (self.window, w, h, -1)
-        self.__offscreen_size = (w, h)
+        x, y, width, height = self.get_allocation ()
+        if self.__offscreen_size == (width, height):
+            return
+
+        self.__offscreen = gtk.gdk.Pixmap (self.window, width, height, -1)
+        self.__offscreen_size = (width, height)
+        self.__offscreen_dirty = (0, width)
         if not self.__offscreen:
             self.__offscreen_size = (0, 0)
             raise ValueError ("could not obtain pixmap")
 
-    def __redraw (self):
+    def __invalidate_offscreen (self, start, stop):
+
+        x, y, width, height = self.get_allocation ()
+        if stop < 0:
+            stop += width
+
+        dirty_start, dirty_stop = self.__offscreen_dirty
+        if dirty_start != dirty_stop:
+            dirty_start = min (dirty_start, start)
+            dirty_stop = max (dirty_stop, stop)
+        else:
+            dirty_start = start
+            dirty_stop = stop
+        self.__offscreen_dirty = (dirty_start, dirty_stop)
+
+        # Just like in __draw_offscreen. FIXME: Need this in one place!
+        start -= 8
+        stop += 8
+        self.queue_draw_area (start, 0, stop - start, height)
+
+    def __draw_from_offscreen (self, rect = None):
 
         if not self.props.visible:
             return
 
-        self.__ensure_offscreen ()
-        self.__draw_offscreen ()
-        self.__update_from_offscreen ()
-
-    def __update_from_offscreen (self, rect = None):
-
-        if not self.props.visible:
-            return
-
-        if self.__offscreen is None:
-            self.__redraw ()
-
-        x, y, w, h = self.get_allocation ()
-        off_w, off_h = self.__offscreen_size
+        x, y, width, height = self.get_allocation ()
+        offscreen_width, offscreen_height = self.__offscreen_size
+        if rect is None:
+            rect = (0, 0, width, height)
 
         # Fill the background (where the offscreen pixmap doesn't fit) with
         # white. This happens after enlarging the window, until all sentinels
         # have finished running.
-        draw_background = True
-        if off_w >= w and off_h >= h:
-            draw_background = False
-
-        if draw_background:
+        if offscreen_width < width or offscreen_height < height:
             ctx = self.window.cairo_create ()
 
             if rect:
@@ -496,24 +526,20 @@ class TimelineWidget (gtk.DrawingArea):
                                rect.y + rect.height)
                 ctx.clip ()
 
-            if off_w < w:
-                ctx.rectangle (off_w, 0, w, off_h)
-            if off_h < h:
+            if offscreen_width < width:
+                ctx.rectangle (offscreen_width, 0, width, offscreen_height)
+            if offscreen_height < height:
                 ctx.new_path ()
-                ctx.rectangle (0, off_h, w, h)
+                ctx.rectangle (0, offscreen_height, width, height)
 
             ctx.set_line_width (0.)
             ctx.set_source_rgb (1., 1., 1.)
             ctx.fill ()
 
         gc = gtk.gdk.GC (self.window)
-        if rect is None:
-            self.window.draw_drawable (gc, self.__offscreen, 0, 0, 0, 0, -1, -1)
-            self.__draw_position (self.window)
-        else:
-            x, y, w, h = rect
-            self.window.draw_drawable (gc, self.__offscreen, x, y, x, y, w, h)
-            self.__draw_position (self.window, clip = rect)
+        x, y, width, height = rect
+        self.window.draw_drawable (gc, self.__offscreen, x, y, x, y, width, height)
+        self.__draw_position (self.window, clip = rect)
 
     def update (self, model):
 
@@ -521,6 +547,7 @@ class TimelineWidget (gtk.DrawingArea):
         self.model = model
 
         if model is not None:
+            self.__dist_sentinel_progress = 0
             self.process.freq_sentinel = LineFrequencySentinel (model)
             self.process.dist_sentinel = LevelDistributionSentinel (self.process.freq_sentinel, model)
             width = self.get_allocation ()[2]
@@ -533,11 +560,9 @@ class TimelineWidget (gtk.DrawingArea):
         self.process.abort ()
         self.process.freq_sentinel = None
         self.process.dist_sentinel = None
-        self.__redraw ()
+        self.__invalidate_offscreen (0, -1)
 
     def update_position (self, start_ts, end_ts):
-
-        self.__position_ts_range = (start_ts, end_ts,)
 
         if not self.process.freq_sentinel:
             return
@@ -545,7 +570,17 @@ class TimelineWidget (gtk.DrawingArea):
         if not self.process.freq_sentinel.data:
             return
 
-        self.__update_from_offscreen ()
+        x, y, width, height = self.get_allocation ()
+
+        # Queue old position rectangle for redraw:
+        if self.__position_ts_range is not None:
+            start, stop = self.ts_range_to_position (*self.__position_ts_range)
+            self.queue_draw_area (start - 1, 0, stop - start + 2, height)
+        # And the new one:
+        start, stop = self.ts_range_to_position (start_ts, end_ts)
+        self.queue_draw_area (start - 1, 0, stop - start + 2, height)
+
+        self.__position_ts_range = (start_ts, end_ts,)
 
     def find_indicative_time_step (self):
 
@@ -555,14 +590,30 @@ class TimelineWidget (gtk.DrawingArea):
 
     def __draw_offscreen (self):
 
+        dirty_start, dirty_stop = self.__offscreen_dirty
+        if dirty_start == dirty_stop:
+            return
+
+        self.__offscreen_dirty = (0, 0)
+
         drawable = self.__offscreen
-        w, h = self.__offscreen_size
+        width, height = self.__offscreen_size
 
         ctx = drawable.cairo_create ()
 
+        # Indicator (triangle) size is 8, so we need to draw surrounding areas
+        # a bit:
+        dirty_start -= 8
+        dirty_stop += 8
+        dirty_start = max (dirty_start, 0)
+        dirty_stop = min (dirty_stop, width)
+
+        ctx.rectangle (dirty_start, 0., dirty_stop, height)
+        ctx.clip ()
+
         # White background rectangle.
         ctx.set_line_width (0.)
-        ctx.rectangle (0, 0, w, h)
+        ctx.rectangle (0, 0, width, height)
         ctx.set_source_rgb (1., 1., 1.)
         ctx.fill ()
         ctx.new_path ()
@@ -570,10 +621,10 @@ class TimelineWidget (gtk.DrawingArea):
         # Horizontal reference lines.
         ctx.set_line_width (1.)
         ctx.set_source_rgb (.95, .95, .95)
-        for i in range (h // 16):
+        for i in range (height // 16):
             y = i * 16 - .5
             ctx.move_to (0, y)
-            ctx.line_to (w, y)
+            ctx.line_to (width, y)
             ctx.stroke ()
 
         if self.process.freq_sentinel is None:
@@ -582,27 +633,30 @@ class TimelineWidget (gtk.DrawingArea):
         # Vertical reference lines.
         pixel_step = self.find_indicative_time_step ()
         ctx.set_source_rgb (.9, .9, .9)
-        for i in range (1, w // pixel_step + 1):
-            x = i * pixel_step - .5
-            ctx.move_to (x, 0)
-            ctx.line_to (x, h)
+        start = dirty_start - dirty_start % pixel_step
+        for x in xrange (start + pixel_step, dirty_stop, pixel_step):
+            ctx.move_to (x - .5, 0)
+            ctx.line_to (x - .5, height)
             ctx.stroke ()
 
         if not self.process.freq_sentinel.data:
             self.logger.debug ("frequency sentinel has no data yet")
             return
 
+        ctx.translate (dirty_start, 0.)
+
         maximum = max (self.process.freq_sentinel.data)
 
         ctx.set_source_rgb (0., 0., 0.)
-        self.__draw_graph (ctx, w, h, maximum, self.process.freq_sentinel.data)
+        data = self.process.freq_sentinel.data[dirty_start:dirty_stop]
+        self.__draw_graph (ctx, height, maximum, data)
 
         if not self.process.dist_sentinel.data:
             self.logger.debug ("level distribution sentinel has no data yet")
             return
 
         colors = LevelColorThemeTango ().colors
-        dist_data = self.process.dist_sentinel.data
+        dist_data = self.process.dist_sentinel.data[dirty_start:dirty_stop]
 
         def cumulative_level_counts (*levels):
             for level_counts in dist_data:
@@ -614,7 +668,7 @@ class TimelineWidget (gtk.DrawingArea):
                        Data.debug_level_log,
                        Data.debug_level_debug,)
         ctx.set_source_rgb (*(colors[level][1].float_tuple ()))
-        self.__draw_graph (ctx, w, h, maximum,
+        self.__draw_graph (ctx, height, maximum,
                            list (cumulative_level_counts (level, *levels_prev)))
 
         level = Data.debug_level_debug
@@ -622,24 +676,24 @@ class TimelineWidget (gtk.DrawingArea):
                        Data.debug_level_fixme,
                        Data.debug_level_log,)
         ctx.set_source_rgb (*(colors[level][1].float_tuple ()))
-        self.__draw_graph (ctx, w, h, maximum,
+        self.__draw_graph (ctx, height, maximum,
                            list (cumulative_level_counts (level, *levels_prev)))
 
         level = Data.debug_level_log
         levels_prev = (Data.debug_level_trace,Data.debug_level_fixme,)
         ctx.set_source_rgb (*(colors[level][1].float_tuple ()))
-        self.__draw_graph (ctx, w, h, maximum,
+        self.__draw_graph (ctx, height, maximum,
                            list (cumulative_level_counts (level, *levels_prev)))
 
         level = Data.debug_level_fixme
         levels_prev = (Data.debug_level_trace,)
         ctx.set_source_rgb (*(colors[level][1].float_tuple ()))
-        self.__draw_graph (ctx, w, h, maximum,
+        self.__draw_graph (ctx, height, maximum,
                            list (cumulative_level_counts (level, *levels_prev)))
 
         level = Data.debug_level_trace
         ctx.set_source_rgb (*(colors[level][1].float_tuple ()))
-        self.__draw_graph (ctx, w, h, maximum, [counts[level] for counts in dist_data])
+        self.__draw_graph (ctx, height, maximum, [counts[level] for counts in dist_data])
 
         # Draw error and warning triangle indicators:
 
@@ -654,49 +708,57 @@ class TimelineWidget (gtk.DrawingArea):
             for i, counts in enumerate (dist_data):
                 if counts[level] == 0:
                     continue
-                ctx.identity_matrix ()
-                ctx.translate (i, 0)
+                ctx.translate (i, 0.)
                 triangle (ctx)
                 ctx.fill ()
+                ctx.translate (-i, 0.)
 
-    def __draw_graph (self, ctx, w, h, maximum, data):
+    def __draw_graph (self, ctx, height, maximum, data):
 
         if not data:
             return
 
-        heights = [h * float (d) / maximum for d in data]
-        ctx.move_to (0, h)
+        heights = [height * float (d) / maximum for d in data]
+        ctx.move_to (0, height)
         for i in range (len (heights)):
-            ctx.line_to (i - .5, h - heights[i] + .5)
+            ctx.line_to (i - .5, height - heights[i] + .5)
 
-        ctx.line_to (i, h)
+        ctx.line_to (i, height)
         ctx.close_path ()
 
         ctx.fill ()
 
     def __have_position (self):
 
-        if ((self.__position_ts_range is not None) and
-            (self.process is not None) and
+        if ((self.process is not None) and
             (self.process.freq_sentinel is not None) and
             (self.process.freq_sentinel.ts_range is not None)):
             return True
         else:
             return False
 
-    def __draw_position (self, drawable, clip = None):
+    def ts_range_to_position (self, start_ts, end_ts):
 
         if not self.__have_position ():
-            return
+            return (0, 0)
 
-        start_ts, end_ts = self.__position_ts_range
         first_ts, last_ts = self.process.freq_sentinel.ts_range
         step = self.process.freq_sentinel.step
         if step == 0:
-            return
+            return (0, 0)
 
         position1 = int (float (start_ts - first_ts) / step)
         position2 = int (float (end_ts - first_ts) / step)
+
+        return (position1, position2)
+
+    def __draw_position (self, drawable, clip = None):
+
+        if not self.__have_position () or self.__position_ts_range is None:
+            return
+
+        start_ts, end_ts = self.__position_ts_range
+        position1, position2 = self.ts_range_to_position (start_ts, end_ts)
 
         if clip:
             clip_x, clip_y, clip_w, clip_h = clip
@@ -704,7 +766,7 @@ class TimelineWidget (gtk.DrawingArea):
                 return
 
         ctx = drawable.cairo_create ()
-        x, y, w, h = self.get_allocation ()
+        x, y, width, height = self.get_allocation ()
 
         if clip:
             ctx.rectangle (*clip)
@@ -715,22 +777,22 @@ class TimelineWidget (gtk.DrawingArea):
             ctx.set_source_rgb (1., 0., 0.)
             ctx.set_line_width (1.)
             ctx.move_to (position1 + .5, 0)
-            ctx.line_to (position1 + .5, h)
+            ctx.line_to (position1 + .5, height)
             ctx.stroke ()
         else:
             ctx.set_source_rgba (1., 0., 0., .5)
-            ctx.rectangle (position1, 0, line_width, h)
+            ctx.rectangle (position1, 0, line_width, height)
             ctx.fill ()
 
-    def __handle_expose_event (self, self_, event):
+    def do_expose_event (self, event):
 
-        if self.__offscreen:
-            self.__update_from_offscreen (event.area)
-        else:
-            self.__redraw ()
+        self.__ensure_offscreen ()
+        self.__draw_offscreen ()
+        self.__draw_from_offscreen (event.area)
+
         return True
 
-    def __handle_configure_event (self, self_, event):
+    def do_configure_event (self, event):
 
         self.logger.debug ("widget size configured to %ix%i",
                            event.width, event.height)
@@ -742,10 +804,56 @@ class TimelineWidget (gtk.DrawingArea):
 
         return False
 
-    def __handle_size_request (self, self_, req):
+    def do_size_request (self, req):
 
         # FIXME:
         req.height = 64
+
+    def do_button_press_event (self, event):
+
+        if event.button != 1:
+            return False
+
+        # TODO: Check if clicked inside a warning/error indicator triangle and
+        # navigate there.
+
+        if not self.has_grab ():
+            self.grab_add ()
+            self.props.has_tooltip = False
+
+        pos = int (event.x)
+        self.emit ("change-position", pos)
+        return True
+
+    def do_button_release_event (self, event):
+
+        if event.button != 1:
+            return False
+
+        if self.has_grab ():
+            self.grab_remove ()
+            self.props.has_tooltip = True
+
+        return True
+
+    def do_motion_notify_event (self, event):
+
+        x, y, mod = self.window.get_pointer ()
+
+        if event.state & gtk.gdk.BUTTON1_MASK:
+            self.emit ("change-position", int (x))
+            gtk.gdk.event_request_motions (event)
+            return True
+        else:
+            self._handle_motion (x, y)
+            gtk.gdk.event_request_motions (event)
+            return False
+
+    def _handle_motion (self, x, y):
+
+        # TODO: Prelight warning and error indicator triangles.
+
+        pass
 
 class AttachedWindow (object):
 
@@ -766,20 +874,18 @@ class AttachedWindow (object):
                    gtk.UI_MANAGER_POPUP, False)
         # TODO: Make hide before/after operate on the partition that the mouse
         # is pointed at instead of the currently selected line.
-        ui.add_ui (self.merge_id, "/TimelineContextMenu", "TimelineHideLinesBefore",
-                   "hide-before-line", gtk.UI_MANAGER_MENUITEM, False)
-        ui.add_ui (self.merge_id, "/TimelineContextMenu", "TimelineHideLinesAfter",
-                   "hide-after-line", gtk.UI_MANAGER_MENUITEM, False)
+        # ui.add_ui (self.merge_id, "/TimelineContextMenu", "TimelineHideLinesBefore",
+        #            "hide-before-line", gtk.UI_MANAGER_MENUITEM, False)
+        # ui.add_ui (self.merge_id, "/TimelineContextMenu", "TimelineHideLinesAfter",
+        #            "hide-after-line", gtk.UI_MANAGER_MENUITEM, False)
         ui.add_ui (self.merge_id, "/TimelineContextMenu", "TimelineShowHiddenLines",
                    "show-hidden-lines", gtk.UI_MANAGER_MENUITEM, False)
 
         box = window.get_top_attach_point ()
 
         self.timeline = TimelineWidget ()
-        self.timeline.add_events (gtk.gdk.BUTTON1_MOTION_MASK |
-                                  gtk.gdk.BUTTON_PRESS_MASK)
-        self.timeline.connect ("button-press-event", self.handle_timeline_button_press_event)
-        self.timeline.connect ("motion-notify-event", self.handle_timeline_motion_notify_event)
+        self.timeline.connect ("change-position",
+                               self.handle_timeline_change_position)
         box.pack_start (self.timeline, False, False, 0)
         self.timeline.hide ()
 
@@ -886,39 +992,9 @@ class AttachedWindow (object):
             self.timeline.hide ()
             self.vtimeline.hide ()
 
-    def handle_timeline_button_press_event (self, widget, event):
+    def handle_timeline_change_position (self, widget, pos):
 
-        if event.button != 1:
-            return False
-
-        # TODO: Check if clicked inside a warning/error indicator triangle and
-        # navigate there.
-
-        pos = int (event.x)
         self.goto_time_position (pos)
-        return False
-
-    def handle_timeline_motion_notify_event (self, widget, event):
-
-        x = event.x
-        y = event.y
-
-        if event.state & gtk.gdk.BUTTON1_MASK:
-            self.handle_timeline_motion_button1 (x, y)
-            return True
-        else:
-            self.handle_timeline_motion (x, y)
-            return False
-
-    def handle_timeline_motion (self, x, y):
-
-        # TODO: Prelight warning and error indicator triangles.
-
-        pass
-
-    def handle_timeline_motion_button1 (self, x, y):
-
-        self.goto_time_position (int (x))
 
     def goto_time_position (self, pos):
 

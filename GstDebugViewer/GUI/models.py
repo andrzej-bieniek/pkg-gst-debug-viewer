@@ -19,6 +19,7 @@
 
 """GStreamer Debug Viewer GUI module."""
 
+from array import array
 from bisect import bisect_left
 import logging
 
@@ -48,7 +49,7 @@ class LogModelBase (gtk.GenericTreeModel):
 
         ##self.props.leak_references = False
 
-        self.line_offsets = []
+        self.line_offsets = array ("I")
         self.line_levels = [] # FIXME: Not so nice!
         self.line_cache = {}
 
@@ -128,6 +129,13 @@ class LogModelBase (gtk.GenericTreeModel):
             value = self.access_offset (line_offset + message_offset).strip ()
 
         return value
+
+    def get_value_range (self, col_id, start, stop):
+
+        if col_id != self.COL_LEVEL:
+            raise NotImplementedError ("XXX FIXME")
+
+        return self.line_levels[start:stop]
 
     def on_iter_next (self, line_index):
 
@@ -259,11 +267,9 @@ class FilteredLogModel (FilteredLogModelBase):
         YIELD_LIMIT = 10000
 
         self.logger.debug ("preparing new filter")
-        ## del self.line_offsets[:]
-        ## del self.line_levels[:]
-        new_line_offsets = []
+        new_line_offsets = array ("I")
         new_line_levels = []
-        new_super_index = []
+        new_super_index = array ("I")
         level_id = self.COL_LEVEL
         func = filter.filter_func
         def enum ():
@@ -397,7 +403,16 @@ class SubRange (object):
 
     def __getitem__ (self, i):
 
-        return self.l[i + self.start]
+        if isinstance (i, slice):
+            stop = i.stop
+            if stop >= 0:
+                stop += self.start
+            else:
+                stop += self.stop
+
+            return self.l[i.start + self.start:stop]
+        else:
+            return self.l[i + self.start]
 
     def __len__ (self):
 

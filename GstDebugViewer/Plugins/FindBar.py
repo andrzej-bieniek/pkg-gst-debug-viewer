@@ -24,7 +24,7 @@ import logging
 from GstDebugViewer import Common, Data, GUI
 from GstDebugViewer.Plugins import *
 
-import pango
+import glib
 import gtk
 
 class SearchOperation (object):
@@ -43,9 +43,15 @@ class SearchOperation (object):
 
             message = model_row[col_id]
             if search_text in message:
-                # TODO: Return all match ranges here.
-                pos = message.find (search_text)
-                return ((pos, pos + len_search_text,),)
+                ranges = []
+                start = 0
+                while True:
+                    pos = message.find (search_text, start)
+                    if pos == -1:
+                        break
+                    ranges.append ((pos, pos + len_search_text,))
+                    start = pos + len_search_text
+                return ranges
             else:
                 return ()
 
@@ -146,11 +152,9 @@ class FindBarWidget (gtk.HBox):
         next_action.connect_proxy (next_button)
         self.pack_start (next_button, False, False, 0)
 
-        self.status_label = gtk.Label ("")
+        self.status_label = gtk.Label ()
         self.status_label.props.xalign = 0.
-        attrs = pango.AttrList ()
-        attrs.insert (pango.AttrWeight (pango.WEIGHT_BOLD, 0, -1))
-        self.status_label.props.attributes = attrs
+        self.status_label.props.use_markup = True
         self.pack_start (self.status_label, False, False, 6)
         self.__compute_status_size ()
         self.status_label.connect ("notify::style", self.__handle_notify_style)
@@ -160,7 +164,7 @@ class FindBarWidget (gtk.HBox):
     def __compute_status_size (self):
 
         label = self.status_label
-        old_text = label.props.label
+        old_markup = label.props.label
         label.set_size_request (-1, -1)
         max_width = 0
         try:
@@ -170,7 +174,7 @@ class FindBarWidget (gtk.HBox):
                 max_width = max (max_width, width)
             label.set_size_request (max_width, -1)
         finally:
-            label.props.label = old_text
+            label.props.label = old_markup
 
     def __handle_notify_style (self, *a, **kw):
 
@@ -178,7 +182,9 @@ class FindBarWidget (gtk.HBox):
 
     def __set_status (self, text):
 
-        self.status_label.props.label = text
+        markup = "<b>%s</b>" % (glib.markup_escape_text (text),)
+
+        self.status_label.props.label = markup
 
     def status_no_match_found (self):
 
