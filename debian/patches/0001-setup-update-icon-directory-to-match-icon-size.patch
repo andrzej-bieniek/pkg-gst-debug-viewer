@@ -1,0 +1,21 @@
+From: Andrzej Bieniek <andyhelp@gmail.com>
+Date: Tue, 18 Dec 2012 23:20:26 +0000
+Subject: setup: update icon directory to match icon size
+
+---
+ setup.py |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/setup.py b/setup.py
+index 216eca0..8089924 100755
+--- a/setup.py
++++ b/setup.py
+@@ -332,7 +332,7 @@ setup (cmdclass = cmdclass,
+        data_files = [("share/gst-debug-viewer", ["data/about-dialog.ui",
+                                                  "data/main-window.ui",
+                                                  "data/menus.ui"],),
+-                     ("share/icons/hicolor/48x48/apps", ["data/gst-debug-viewer.png"],),
++                     ("share/icons/hicolor/64x64/apps", ["data/gst-debug-viewer.png"],),
+                      ("share/icons/hicolor/scalable/apps", ["data/gst-debug-viewer.svg"],)],
+ 
+        name = "gst-debug-viewer",
